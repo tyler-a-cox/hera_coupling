@@ -1,6 +1,21 @@
 import jax
-from jax import numpy as np
+from jax import numpy as jnp
 
+
+@jax.jit
+def scaled_log1p(x, alpha=1.0, floor=0.0):
+    """
+    Apply the scaled log1p transformation: f(x) = (1/alpha)*log(1 + alpha*x).
+    
+    Parameters:
+    x (float): Input value
+    alpha (float): Scaling factor
+    floor (float): Floor value
+
+    Returns:
+    float: Transformed value
+    """
+    return jnp.maximum(jnp.log1p(alpha * x) / jnp.log(alpha), floor)
 
 @jax.jit
 def mean_squared_error(y_true, y_pred):
@@ -14,11 +29,11 @@ def mean_squared_error(y_true, y_pred):
     Returns:
     float: Mean Squared Error
     """
-    mse = np.mean((y_true - y_pred) ** 2)
+    mse = jnp.mean(jnp.abs(y_true - y_pred) ** 2)
     return mse
 
 @jax.jit
-def log_loss(y_true, y_pred, noise):
+def log_loss(difference, alpha=1.0, min_val=0.0):
     """
     Calculate the Logarithmic Loss (Log Loss) between true and predicted values.
 
@@ -30,6 +45,13 @@ def log_loss(y_true, y_pred, noise):
     Returns:
     float: Logarithmic Loss
     """
-    y_pred = np.clip(y_pred, eps, 1 - eps)
-    logloss = -np.mean(y_true * np.log(y_pred) + (1 - y_true) * np.log(1 - y_pred))
+    #y_pred = np.clip(y_pred, eps, 1 - eps)
+    #logloss = -np.mean(y_true * np.log(y_pred) + (1 - y_true) * np.log(1 - y_pred))
+    logloss = jnp.mean(
+        scaled_log1p(
+            jnp.abs(difference), 
+            alpha=alpha, 
+            min_val=min_val
+        )
+    )
     return logloss

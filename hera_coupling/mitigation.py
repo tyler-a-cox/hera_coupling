@@ -3,12 +3,22 @@ import tqdm
 
 import jax
 import optax
+import jaxopt
 from jax import numpy as jnp
 from typing import Tuple, Union, List
-from .modeling import deconvolve_visibilties
+from .modeling import deconvolve_visibilties, select_batch, couple_visibilities
+from .loss_functions import log_loss, mean_squared_error
 
 @jax.jit
-def _loss_function_(parameters: dict, data: jnp.ndarray, data_fft: jnp.ndarray, idx: jnp.ndarray, mask: jnp.ndarray, window: jnp.ndarray, min_val: float, lamb: float):
+def deconv_loss_function(
+    parameters: dict, 
+    data_fft: jnp.ndarray, 
+    idx: jnp.ndarray, 
+    mask: jnp.ndarray, 
+    window: jnp.ndarray, 
+    min_val: float, 
+    lamb: float
+) -> float:
     """
     Loss function for FFT version of mutual coupling solver
     
@@ -16,8 +26,14 @@ def _loss_function_(parameters: dict, data: jnp.ndarray, data_fft: jnp.ndarray, 
     ----------
         parameters : dict
             Dictionary of parameters containing keys "coupling"
-        data : jnp.ndarray
-            Data in grid
+        data_fft : jnp.ndarray
+            FFT of data
+        idx : jnp.ndarray
+            Index of data to consider
+        mask : jnp.ndarray
+            Mask applied to data
+        window : jnp.ndarray
+            Window function applied to data
         min_val : float
             Minimum value in 
         lamb : float
@@ -32,15 +48,41 @@ def _loss_function_(parameters: dict, data: jnp.ndarray, data_fft: jnp.ndarray, 
     data_deconv = deconvolve_visibilties(
         parameters=parameters, data_fft=data_fft, mask=mask
     )
-    diff = (data_deconv[:, :, idx[:, 0], idx[:, 1]] - data[:, :, idx[:, 0], idx[:, 1]]) * mask[:, :, idx[:, 0], idx[:, 1]] # Consider diff-ing the squares of the deconvolved data and data
-    #gain = jnp.abs(parameters['coupling'][:, :, 0, 0] - 1.0).sum()
 
+    # Consider diff-ing the squares of the deconvolved data and data
     diff_fft = jnp.fft.fft(data_deconv[:, :, idx[:, 0], idx[:, 1]] * window, axis=0) # just minimize deconvolved data
-    windowing_term = jnp.mean(jnp.log10(jnp.abs(diff_fft) + min_val) * mask[:, :, idx[:, 0], idx[:, 1]])
-    #return lamb * gain + (1 - lamb) * (windowing_term - jnp.log10(min_val))
-    return lamb * jnp.sqrt(jnp.mean(jnp.square(jnp.abs(diff)))) + (1 - lamb) * (windowing_term - jnp.log10(min_val))
+    return lamb * jnp.mean(jnp.square(jnp.abs(diff - 1))) + (1 - lamb) * log_loss(diff_fft, alpha, min_val)
+
+@jax.jit
+def stochastic_loss_function(parameters, visibility_diff, v0, nsamples, key):
+    """
+    Stochastic loss function for the mutual coupling solver.
+    
+    Parameters:
+    parameters (dict): Parameters
+    amat (array-like): Amplitude matrix
+    v0 (array-like): Visibilities
+    key (jax.random.PRNGKey): Random key
+
+    Returns:
+    float: Loss value
+    """
+    # Get the number of times
+    ntimes = v0.shape[0]
+
+    # Randomly select a subset of the data
+    batch_indices = jax.random.choice(key=key, a=ntimes, shape=(nsamples,), replace=False)
+    
+    # Select the subset of data from the batch
+    v0subset = select_batch(v0, batch_indices)
+    amat_subset = select_batch(visibility_diff, batch_indices)
+
+    # Couple the visibilities
+    a_est = couple_visibilities(parameters['coupling'], v0subset)
+
+    return mean_squared_error(amat_subset, a_est)
         
-def optimize(
+def deconvolve_redundantly_averaged(
     parameters: dict, 
     grid_data: jnp.ndarray, 
     mask: jnp.ndarray, 
@@ -95,7 +137,7 @@ def optimize(
     if use_LBFGS:        
         # Use L-BFGS optimizer
         solver = jaxopt.LBFGS(
-            fun=loss_function, 
+            fun=deconv_loss_function, 
             tol=tol, 
             maxiter=maxiter,
             verbose=verbose
@@ -123,7 +165,7 @@ def optimize(
         
         for nit in tqdm.tqdm(range(maxiter), desc="Optimization Progress"):
             # Compute loss and gradients
-            loss_value, grads = jax.value_and_grad(loss_function)(
+            loss_value, grads = jax.value_and_grad(deconv_loss_function)(
                 parameters, 
                 grid_data, 
                 data_fft, 
@@ -147,21 +189,19 @@ def optimize(
                 break
         
         return parameters, loss_history
-            
+    
 
-def _optimize_(
+def decouple_non_redundantly_averaged(
     parameters: dict, 
-    grid_data: jnp.ndarray, 
-    idx: jnp.ndarray,
-    mask: jnp.ndarray, 
-    window: jnp.ndarray, 
-    min_val: float = 30.0, 
-    lamb: float = 1e-3, 
+    v0: jnp.ndarray,
+    v1: jnp.ndarray,
     maxiter: int = 100, 
     use_LBFGS: bool = True, 
     optimizer: optax.GradientTransformation = None,
     tol: float = 1e-6,
-    verbose: bool = False
+    verbose: bool = False,
+    nsamples: int = 20,
+    key: jax.random.PRNGKey = jax.random.PRNGKey(42)
 ) -> Tuple[dict, Union[dict, List[float]]]:
     """
     Optimize parameters using either L-BFGS or a custom optimizer.
@@ -174,16 +214,10 @@ def _optimize_(
     -----------
         parameters : dict
             Initial parameters to be optimized
-        grid_data : jnp.ndarray
-            Input grid data for optimization
-        mask : jnp.ndarray
-            Mask applied during optimization
-        window : jnp.ndarray
-            Window function applied to the data
-        min_val : float, optional
-            Minimum value constraint (default: 30.0)
-        lamb : float, optional
-            Regularization parameter (default: 1e-3)
+        v0 : jnp.ndarray
+            Estimate of the decoupled visibilities. Shape is (ntimes, nants, nants)
+        v1 : jnp.ndarray
+            Measured visibilities. Shape is (ntimes, nants, nants)
         maxiter : int, optional
             Maximum number of iterations (default: 100)
         use_LBFGS : bool, optional
@@ -192,6 +226,12 @@ def _optimize_(
             Custom optimizer if not using L-BFGS
         tol : float, optional
             Tolerance for optimization convergence (default: 1e-6)
+        verbose : bool, optional
+            Whether to print verbose output (default: False)
+        nsamples : int, optional
+            Number of samples to use for stochastic optimization (default: 20)
+        key : jax.random.PRNGKey, optional
+            Random key for stochastic optimization (default: jax.random.PRNGKey(42))
 
     Returns:
     --------
@@ -199,13 +239,13 @@ def _optimize_(
         Optimized parameters and metadata/loss history
     """
     # Compute FFT of input data
-    data_fft = jnp.fft.fft2(grid_data)
+    visibility_diff = v1 - v0
     
     # Validate inputs
     if use_LBFGS:        
         # Use L-BFGS optimizer
         solver = jaxopt.LBFGS(
-            fun=_loss_function_, 
+            fun=stochastic_loss_function, 
             tol=tol, 
             maxiter=maxiter,
             verbose=verbose
@@ -213,13 +253,10 @@ def _optimize_(
 
         solved_params, meta = solver.run(
             parameters, 
-            data=grid_data, 
-            data_fft=data_fft, 
-            idx=idx,
-            mask=mask, 
-            window=window, 
-            min_val=min_val, 
-            lamb=lamb
+            amat=visibility_diff,
+            v0=v0,
+            key=key,
+            nsamples=nsamples
         )
 
         return solved_params, meta
@@ -234,15 +271,12 @@ def _optimize_(
         
         for nit in tqdm.tqdm(range(maxiter), desc="Optimization Progress"):
             # Compute loss and gradients
-            loss_value, grads = jax.value_and_grad(_loss_function_)(
+            loss_value, grads = jax.value_and_grad(stochastic_loss_function)(
                 parameters, 
-                grid_data, 
-                data_fft, 
-                idx,
-                mask, 
-                window, 
-                min_val, 
-                lamb
+                amat=visibility_diff, 
+                v0=v0,   
+                key=key, 
+                nsamples=nsamples,
             )
             
             # Update parameters
