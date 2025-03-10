@@ -1,6 +1,6 @@
 import jax
 from jax import numpy as jnp
-
+jax.config.update("jax_enable_x64", True)
 
 @jax.jit
 def scaled_log1p(x, alpha=1.0, floor=0.0):

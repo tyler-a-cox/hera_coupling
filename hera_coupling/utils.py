@@ -1,11 +1,11 @@
 import jax
 from jax import numpy as jnp
-
+jax.config.update("jax_enable_x64", True)
 
 def project_coordinates(antpair, antpos, ratio: int=3):
     """
     Projects the coordinates of an antenna pair onto a coordinate system defined by the antenna positions.
-    
+    Specific to the HERA array.
     Parameters:
     ----------
         antpair (tuple): 

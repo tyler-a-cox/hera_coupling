@@ -2,6 +2,7 @@
 import tqdm
 
 import jax
+jax.config.update("jax_enable_x64", True)
 import optax
 import jaxopt
 from jax import numpy as jnp

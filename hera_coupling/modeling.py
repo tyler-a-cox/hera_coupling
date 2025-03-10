@@ -1,4 +1,5 @@
 import jax
+jax.config.update("jax_enable_x64", True)
 from jax import numpy as jnp
 from jax import random
 key = random.key(42)
