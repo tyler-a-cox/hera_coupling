@@ -20,7 +20,7 @@ def deconvolve_visibilties(parameters, data_fft):
     return model
 
 @jax.jit
-def couple_visibilities(visibilities, coupling_matrix):
+def couple_visibilities_first_order(visibilities, coupling_matrix):
     """
     Couple visibilities using the provided coupling matrix.
 
@@ -38,6 +38,26 @@ def couple_visibilities(visibilities, coupling_matrix):
         jnp.einsum(
             "mn,...in->...mi", coupling_matrix, visibilities.conj()
             )
+    )
+    return coupled_visibilities
+
+@jax.jit
+def couple_visibilities_second_order(visibilities, coupling_matrix):
+    """
+    Couple visibilities using the provided coupling matrix.
+
+    Parameters:
+    visibilities (array-like): Visibilities
+    coupling_matrix (array-like): Coupling matrix
+
+    Returns:
+    array-like: Coupled visibilities
+    """
+    coupled_visibilities = jnp.einsum(
+        "mn,...no,op->...mp", 
+        coupling_matrix.T.conj(), 
+        visibilities, 
+        coupling_matrix
     )
     return coupled_visibilities
 

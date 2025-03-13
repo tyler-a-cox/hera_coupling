@@ -55,7 +55,7 @@ def deconv_loss_function(
     return lamb * jnp.mean(jnp.square(jnp.abs(diff - 1))) + (1 - lamb) * log_loss(diff_fft, alpha, min_val)
 
 @jax.jit
-def stochastic_loss_function(parameters, visibility_diff, v0, nsamples, key):
+def first_order_loss_function(parameters, visibility_diff, v0, nsamples, key):
     """
     Stochastic loss function for the mutual coupling solver.
     
@@ -82,6 +82,35 @@ def stochastic_loss_function(parameters, visibility_diff, v0, nsamples, key):
     a_est = couple_visibilities(parameters['coupling'], v0subset)
 
     return mean_squared_error(amat_subset, a_est)
+
+@jax.jit
+def second_order_loss_function(parameters, v1, v0, nsamples, key):
+    """
+    Stochastic loss function for the mutual coupling solver.
+    
+    Parameters:
+    parameters (dict): Parameters
+    amat (array-like): Amplitude matrix
+    v0 (array-like): Visibilities
+    key (jax.random.PRNGKey): Random key
+
+    Returns:
+    float: Loss value
+    """
+    # Get the number of times
+    ntimes = v0.shape[0]
+
+    # Randomly select a subset of the data
+    batch_indices = jax.random.choice(key=key, a=ntimes, shape=(nsamples,), replace=False)
+    
+    # Select the subset of data from the batch
+    v0subset = select_batch(v0, batch_indices)
+    v1subset = select_batch(v1, batch_indices)
+
+    # Couple the visibilities
+    a_est = couple_visibilities(parameters['coupling'], v0subset)
+
+    return mean_squared_error(v1subset, a_est)
         
 def deconvolve_redundantly_averaged(
     parameters: dict, 
